@@ -6,7 +6,7 @@
 3. 选择功能:
    - 选项1: 基础推理
    - 选项2: 启动Web服务（FastAPI + Streamlit）
-   - 选项3: RAG问答
+   - 选项3: 成语接龙游戏
    - 选项4: Agent代理
    - 选项5: 性能测试
 """
@@ -15,11 +15,15 @@ import os
 import sys
 import json
 import time
+import re
+import random
 import requests
 import threading
 import webbrowser
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Set
 from datetime import datetime
+from collections import defaultdict
+
 
 # ==================== 检查依赖 ====================
 def check_dependencies():
@@ -54,9 +58,11 @@ def check_dependencies():
         print("缺少以下依赖，请先安装:")
         print(f"pip install {' '.join(missing)}")
         print("\n完整安装命令:")
-        print("pip install torch transformers langchain langchain-openai langchain-community langchain-huggingface fastapi uvicorn streamlit openai sentence-transformers faiss-cpu")
+        print(
+            "pip install torch transformers langchain langchain-openai langchain-community langchain-huggingface fastapi uvicorn streamlit openai sentence-transformers faiss-cpu")
         return False
     return True
+
 
 # ==================== 配置 ====================
 class Config:
@@ -73,13 +79,11 @@ class Config:
     BACKEND_PORT = 6066
     STREAMLIT_PORT = 8501
 
-    # RAG配置
-    CHUNK_SIZE = 200
-    CHUNK_OVERLAP = 20
-    EMBEDDING_MODEL = "models/AI-ModelScope/bge-large-zh-v1_5"
+    # 成语接龙配置
+    IDIOM_FILE = "cyjl.txt"  # 成语文档路径
+
 
 # ==================== 基础推理模块 ====================
-# ==================== 基础推理模块（使用Ollama API）====================
 class BasicInference:
     """基础推理类 - 使用Ollama API"""
 
@@ -144,203 +148,198 @@ class BasicInference:
             response = self.chat(user_input)
             print(response)
 
-    def load_model(self):
-        """加载模型"""
-        try:
-            from transformers import AutoModelForCausalLM, AutoTokenizer
-            import torch
 
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            print(f"使用设备: {self.device}")
-
-            print(f"加载模型: {Config.MODEL_PATH}")
-            self.tokenizer = AutoTokenizer.from_pretrained(Config.MODEL_PATH)
-            self.model = AutoModelForCausalLM.from_pretrained(
-                Config.MODEL_PATH,
-                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32
-            ).to(self.device)
-            print("模型加载完成")
-            return True
-        except Exception as e:
-            print(f"模型加载失败: {e}")
-            print("请先运行 download_model.py 下载模型")
-            return False
-
-    def chat(self, prompt: str, system_prompt: str = "You are a helpful assistant.",
-             max_new_tokens: int = 512) -> str:
-        """对话"""
-        if self.model is None:
-            if not self.load_model():
-                return "模型未加载"
-
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt}
-        ]
-
-        text = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-
-        model_inputs = self.tokenizer([text], return_tensors="pt").to(self.device)
-        generated_ids = self.model.generate(
-            model_inputs.input_ids,
-            max_new_tokens=max_new_tokens,
-            do_sample=True,
-            temperature=0.7
-        )
-
-        generated_ids = [output_ids[len(input_ids):] for input_ids, output_ids
-                        in zip(model_inputs.input_ids, generated_ids)]
-        response = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
-
-        return response
-
-    def run_demo(self):
-        """运行演示"""
-        if not self.load_model():
-            return
-
-        print("\n=== 基础推理演示 ===")
-        print("输入 'quit' 退出")
-
-        while True:
-            user_input = input("\n你: ")
-            if user_input.lower() in ['quit', 'exit', 'q']:
-                break
-
-            print("助手: ", end="", flush=True)
-            response = self.chat(user_input)
-            print(response)
-
-# ==================== RAG问答模块 ====================
-class RAGQA:
-    """RAG问答系统"""
+# ==================== 成语接龙游戏模块 ====================
+class IdiomSolitaire:
+    """成语接龙游戏 - 基于成语文档"""
 
     def __init__(self):
-        self.vector_store = None
-        self.retriever = None
-        self.qa_chain = None
-        self.llm = None
+        self.idioms: Set[str] = set()  # 所有成语集合
+        self.first_char_map: Dict[str, List[str]] = defaultdict(list)  # 按首字母分组
+        self.load_idioms()
 
-    def init_llm(self):
-        """初始化LLM"""
+    def load_idioms(self) -> bool:
+        """加载成语文档"""
+        file_path = Config.IDIOM_FILE
         try:
-            from langchain_openai import ChatOpenAI
-            self.llm = ChatOpenAI(
-                openai_api_key=Config.API_KEY,
-                base_url=Config.OLLAMA_URL,
-                model=Config.MODEL_NAME
-            )
+            if not os.path.exists(file_path):
+                print(f"⚠️ 文件不存在: {file_path}")
+                print("请创建 cyjl.txt 文件，每行一个成语")
+                print("示例格式:")
+                print("一心一意")
+                print("意气风发")
+                print("发奋图强")
+                return False
+
+            with open(file_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+
+                    # 提取成语（可能包含解释，取第一个词）
+                    parts = line.split()
+                    idiom = parts[0].strip()
+
+                    # 验证成语格式（至少2个字，且都是中文）
+                    if len(idiom) >= 2 and re.match(r'^[\u4e00-\u9fff]+$', idiom):
+                        self.idioms.add(idiom)
+                        first_char = idiom[0]
+                        self.first_char_map[first_char].append(idiom)
+
+            print(f"✅ 加载成语完成，共 {len(self.idioms)} 个成语")
             return True
+
         except Exception as e:
-            print(f"LLM初始化失败: {e}")
+            print(f"❌ 加载成语失败: {e}")
             return False
 
-    def create_vector_store(self, documents: List[str]):
-        """创建向量存储"""
-        try:
-            from langchain_huggingface import HuggingFaceEmbeddings
-            from langchain_community.vectorstores import FAISS
-            from langchain.text_splitter import RecursiveCharacterTextSplitter
+    def is_valid_idiom(self, idiom: str) -> bool:
+        """检查成语是否在文档中"""
+        return idiom in self.idioms
 
-            # 文本分割
-            text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=Config.CHUNK_SIZE,
-                chunk_overlap=Config.CHUNK_OVERLAP
-            )
-            chunks = text_splitter.create_documents(documents)
+    def get_idioms_by_first_char(self, char: str) -> List[str]:
+        """根据首字获取成语列表"""
+        return self.first_char_map.get(char, [])
 
-            # 创建Embedding
-            embedding = HuggingFaceEmbeddings(model_name=Config.EMBEDDING_MODEL)
+    def get_last_char(self, idiom: str) -> str:
+        """获取成语的最后一个字"""
+        return idiom[-1] if idiom else ""
 
-            # 创建向量存储
-            self.vector_store = FAISS.from_documents(chunks, embedding)
-            self.retriever = self.vector_store.as_retriever()
-
-            print(f"向量存储创建完成，共{len(chunks)}个文档块")
-            return True
-        except Exception as e:
-            print(f"向量存储创建失败: {e}")
+    def check_connection(self, prev_idiom: str, next_idiom: str) -> bool:
+        """检查两个成语是否能够接龙"""
+        if not prev_idiom or not next_idiom:
             return False
+        return prev_idiom[-1] == next_idiom[0]
 
-    def build_qa_chain(self):
-        """构建问答链"""
+    def run_game(self):
+        """运行成语接龙游戏"""
+        if not self.idioms:
+            print("❌ 成语文档未加载，请确保 cyjl.txt 文件存在")
+            return
+
+        print("\n" + "=" * 50)
+        print("🎮 成语接龙游戏")
+        print("=" * 50)
+        print("游戏规则:")
+        print("1. 玩家输入一个成语，AI接龙")
+        print("2. AI回答的成语必须以玩家成语的最后一个字开头")
+        print("3. 所有成语必须在成语文档中存在")
+        print("4. 如果AI回答的成语不在文档中，AI判负")
+        print("5. 输入 'quit' 退出游戏")
+        print("=" * 50)
+
+        # 初始化LLM客户端
         try:
-            from langchain.chains import RetrievalQA
-            from langchain.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
-
-            system_message = SystemMessagePromptTemplate.from_template(
-                "根据以下已知信息回答用户问题。如果不知道答案，就说不知道。\n已知信息{context}"
-            )
-            human_message = HumanMessagePromptTemplate.from_template("用户问题：{question}")
-            chat_prompt = ChatPromptTemplate.from_messages([system_message, human_message])
-
-            self.qa_chain = RetrievalQA.from_chain_type(
-                llm=self.llm,
-                chain_type="stuff",
-                retriever=self.retriever,
-                chain_type_kwargs={"prompt": chat_prompt}
-            )
-            return True
+            from openai import OpenAI
+            client = OpenAI(api_key=Config.API_KEY, base_url=Config.OLLAMA_URL)
+            print("✅ AI已准备就绪")
         except Exception as e:
-            print(f"问答链创建失败: {e}")
-            return False
-
-    def load_document(self, file_path: str) -> List[str]:
-        """加载文档"""
-        try:
-            from langchain_community.document_loaders import TextLoader
-            loader = TextLoader(file_path, encoding="utf-8")
-            docs = loader.load()
-            return [doc.page_content for doc in docs]
-        except Exception as e:
-            print(f"文档加载失败: {e}")
-            return []
-
-    def query(self, question: str) -> str:
-        """查询"""
-        if self.qa_chain is None:
-            return "请先初始化RAG系统"
-
-        try:
-            result = self.qa_chain.invoke(question)
-            return result.get("result", "")
-        except Exception as e:
-            return f"查询失败: {e}"
-
-    def run_demo(self):
-        """运行演示"""
-        if not self.init_llm():
+            print(f"❌ AI连接失败: {e}")
             return
 
-        print("\n=== RAG问答演示 ===")
-        file_path = input("请输入文档路径（支持txt文件）: ").strip()
-
-        if not os.path.exists(file_path):
-            print("文件不存在")
-            return
-
-        documents = self.load_document(file_path)
-        if not documents:
-            return
-
-        if not self.create_vector_store(documents):
-            return
-
-        if not self.build_qa_chain():
-            return
-
-        print("RAG系统初始化完成，输入 'quit' 退出")
+        used_idioms = set()  # 记录已使用的成语
 
         while True:
-            question = input("\n问题: ")
-            if question.lower() in ['quit', 'exit', 'q']:
+            # 玩家输入
+            print("\n" + "-" * 30)
+            player_input = input("🎯 请输入成语: ").strip()
+
+            if player_input.lower() in ['quit', 'exit', 'q']:
+                print("👋 游戏结束，再见！")
                 break
 
-            print("回答: ", end="", flush=True)
-            answer = self.query(question)
-            print(answer)
+            # 验证玩家输入的成语
+            if not self.is_valid_idiom(player_input):
+                print(f"❌ 错误: '{player_input}' 不在成语文档中，你输了！")
+                print(f"   请使用文档中的成语进行接龙")
+                continue
+
+            # 检查是否重复使用
+            if player_input in used_idioms:
+                print(f"⚠️  '{player_input}' 已经使用过了，请换一个成语")
+                continue
+
+            used_idioms.add(player_input)
+            print(f"✅ 玩家: {player_input}")
+
+            # 获取最后一个字
+            last_char = self.get_last_char(player_input)
+            print(f"📝 最后一个字: '{last_char}'")
+
+            # 获取可用的接龙成语
+            available = self.get_idioms_by_first_char(last_char)
+            available = [a for a in available if a not in used_idioms]
+
+            if not available:
+                print(f"❌ AI无法接龙，AI认输！玩家获胜！")
+                print(f"   没有以 '{last_char}' 开头的成语了")
+                continue
+
+            # 让AI选择接龙的成语
+            print("\n🤖 AI思考中...")
+
+            # 构建提示词，让AI选择合适的成语
+            prompt = f"""你正在玩成语接龙游戏。当前成语是: "{player_input}"，以"{last_char}"结尾。
+请选择一个以"{last_char}"开头的成语进行接龙。
+
+可选的成语有: {available[:30]}
+
+请只回复一个成语，不要有其他内容。回复的成语必须是上面列表中的一个。"""
+
+            try:
+                response = client.chat.completions.create(
+                    model=Config.MODEL_NAME,
+                    messages=[
+                        {"role": "system", "content": "你是一个成语接龙专家。请只回复一个成语，不要有其他内容。"},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=50,
+                    temperature=0.5
+                )
+
+                ai_idiom = response.choices[0].message.content.strip()
+
+                # 清理可能的标点符号
+                ai_idiom = re.sub(r'[^\u4e00-\u9fff]', '', ai_idiom)
+
+                # 验证AI回答的成语
+                if not ai_idiom:
+                    print(f"❌ AI回答为空，AI判负！")
+                    print(f"   玩家获胜！")
+                    continue
+
+                if not self.is_valid_idiom(ai_idiom):
+                    print(f"❌ AI回答 '{ai_idiom}' 不在成语文档中，AI判负！")
+                    print(f"   AI输了！玩家获胜！")
+                    continue
+
+                if ai_idiom in used_idioms:
+                    print(f"⚠️  AI回答 '{ai_idiom}' 已经使用过了，AI判负！")
+                    continue
+
+                # 检查接龙规则
+                if not self.check_connection(player_input, ai_idiom):
+                    print(f"❌ AI回答 '{ai_idiom}' 不以 '{last_char}' 开头，AI判负！")
+                    continue
+
+                print(f"🤖 AI: {ai_idiom}")
+                used_idioms.add(ai_idiom)
+
+                # 显示剩余可接龙的成语数量
+                remaining = self.get_idioms_by_first_char(ai_idiom[-1])
+                remaining = [r for r in remaining if r not in used_idioms]
+                print(f"📊 剩余可接龙成语: {len(remaining)} 个")
+
+            except Exception as e:
+                print(f"❌ AI调用失败: {e}")
+                print(f"   AI判负！玩家获胜！")
+                continue
+
+    def run_demo(self):
+        """运行游戏演示（与接口兼容）"""
+        self.run_game()
+
 
 # ==================== Agent代理模块 ====================
 class AgentDemo:
@@ -424,6 +423,7 @@ Thought: {agent_scratchpad}
 
     def create_weather_tool(self, api_key):
         """创建天气查询工具"""
+
         def weather_query(city: str):
             try:
                 city = city.split("\n")[0]
@@ -437,6 +437,7 @@ Thought: {agent_scratchpad}
                 return f"无法获取{city}的天气信息"
             except Exception as e:
                 return f"查询失败: {e}"
+
         return weather_query
 
     def query(self, question: str) -> str:
@@ -471,6 +472,7 @@ Thought: {agent_scratchpad}
             answer = self.query(question)
             print(f"回答: {answer}")
 
+
 # ==================== FastAPI后端服务 ====================
 class FastAPIServer:
     """FastAPI后端服务"""
@@ -500,14 +502,14 @@ class FastAPIServer:
 
             @app.post("/chat")
             async def chat(
-                query: str = Body(..., description="用户输入"),
-                sys_prompt: str = Body("你是一个有用的助手。", description="系统提示词"),
-                history: List = Body([], description="历史对话"),
-                history_len: int = Body(1, description="保留历史对话轮数"),
-                temperature: float = Body(0.5, description="采样温度"),
-                top_p: float = Body(0.5, description="采样概率"),
-                max_tokens: int = Body(1024, description="最大token数"),
-                stream: bool = Body(True, description="是否流式输出")
+                    query: str = Body(..., description="用户输入"),
+                    sys_prompt: str = Body("你是一个有用的助手。", description="系统提示词"),
+                    history: List = Body([], description="历史对话"),
+                    history_len: int = Body(1, description="保留历史对话轮数"),
+                    temperature: float = Body(0.5, description="采样温度"),
+                    top_p: float = Body(0.5, description="采样概率"),
+                    max_tokens: int = Body(1024, description="最大token数"),
+                    stream: bool = Body(True, description="是否流式输出")
             ):
                 # 控制历史记录长度
                 if history_len > 0:
@@ -534,6 +536,7 @@ class FastAPIServer:
                             chunk_msg = chunk.choices[0].delta.content
                             if chunk_msg:
                                 yield chunk_msg
+
                     return StreamingResponse(generate(), media_type="text/plain")
                 else:
                     return {"response": response.choices[0].message.content}
@@ -572,6 +575,7 @@ class FastAPIServer:
         """停止服务"""
         self.running = False
         print("服务已停止")
+
 
 # ==================== Streamlit前端 ====================
 class StreamlitUI:
@@ -612,7 +616,7 @@ for msg in st.session_state.history:
 if prompt := st.chat_input("来和我聊天~~~"):
     with st.chat_message("user"):
         st.markdown(prompt)
-    
+
     data = {
         "query": prompt,
         "sys_prompt": sys_prompt,
@@ -623,14 +627,14 @@ if prompt := st.chat_input("来和我聊天~~~"):
         "max_tokens": max_tokens,
         "stream": stream
     }
-    
+
     response = requests.post(BACKEND_URL, json=data, stream=True)
-    
+
     if response.status_code == 200:
         chunks = ""
         placeholder = st.chat_message("assistant")
         text = placeholder.markdown("")
-        
+
         if stream:
             for chunk in response.iter_content(decode_unicode=True):
                 chunks += chunk
@@ -638,7 +642,7 @@ if prompt := st.chat_input("来和我聊天~~~"):
         else:
             chunks = response.json().get("response", "")
             text.markdown(chunks)
-        
+
         st.session_state.history.append({"role": "user", "content": prompt})
         st.session_state.history.append({"role": "assistant", "content": chunks})
 '''
@@ -654,6 +658,7 @@ if prompt := st.chat_input("来和我聊天~~~"):
 
         print(f"启动Streamlit前端...")
         os.system(f'streamlit run "{temp_file}"')
+
 
 # ==================== 性能测试模块 ====================
 class PerformanceTest:
@@ -689,14 +694,14 @@ class PerformanceTest:
             end = time.time()
 
             generated_ids = [output_ids[len(input_ids):] for input_ids, output_ids
-                           in zip(model_inputs.input_ids, generated)]
+                             in zip(model_inputs.input_ids, generated)]
             response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
 
             num_tokens = len(generated_ids[0])
             elapsed = end - start
             print(f"生成token数: {num_tokens}")
             print(f"耗时: {elapsed:.2f}秒")
-            print(f"速度: {num_tokens/elapsed:.2f} tokens/秒")
+            print(f"速度: {num_tokens / elapsed:.2f} tokens/秒")
             print(f"响应: {response[:100]}...")
         except Exception as e:
             print(f"测试失败: {e}")
@@ -724,7 +729,8 @@ class PerformanceTest:
             content = response.choices[0].message.content
             num_tokens = len(content)
             elapsed = end - start
-            print(f"非流式 - 生成token数: {num_tokens}, 耗时: {elapsed:.2f}秒, 速度: {num_tokens/elapsed:.2f} tokens/秒")
+            print(
+                f"非流式 - 生成token数: {num_tokens}, 耗时: {elapsed:.2f}秒, 速度: {num_tokens / elapsed:.2f} tokens/秒")
 
             # 测试流式
             start = time.time()
@@ -742,9 +748,11 @@ class PerformanceTest:
 
             num_tokens = len(content)
             elapsed = end - start
-            print(f"流式 - 生成token数: {num_tokens}, 耗时: {elapsed:.2f}秒, 速度: {num_tokens/elapsed:.2f} tokens/秒")
+            print(
+                f"流式 - 生成token数: {num_tokens}, 耗时: {elapsed:.2f}秒, 速度: {num_tokens / elapsed:.2f} tokens/秒")
         except Exception as e:
             print(f"测试失败: {e}")
+
 
 # ==================== 主程序 ====================
 def download_models():
@@ -763,6 +771,7 @@ def download_models():
         print(f"下载失败: {e}")
         print("请手动下载或确保网络连接正常")
 
+
 def start_web_service():
     """启动Web服务"""
     # 启动后端
@@ -777,23 +786,20 @@ def start_web_service():
     print("\n启动Streamlit前端...")
     StreamlitUI.run()
 
+
 def main():
     """主函数"""
     print("""
 ╔══════════════════════════════════════════════════════════════╗
 ║    基于Qwen2.5的RAG+Agent完整项目                            ║
-║    功能: 基础推理 | RAG问答 | Agent代理 | Web服务            ║
+║    功能: 基础推理 | 成语接龙 | Agent代理 | Web服务           ║
 ╚══════════════════════════════════════════════════════════════╝
     """)
-
-    # # 检查依赖
-    # if not check_dependencies():
-    #     return
 
     print("\n请选择功能:")
     print("1. 下载模型")
     print("2. 基础推理演示")
-    print("3. RAG问答演示")
+    print("3. 成语接龙游戏")
     print("4. Agent代理演示")
     print("5. 启动Web服务（FastAPI + Streamlit）")
     print("6. 性能测试")
@@ -806,7 +812,8 @@ def main():
     elif choice == "2":
         BasicInference().run_demo()
     elif choice == "3":
-        RAGQA().run_demo()
+        game = IdiomSolitaire()
+        game.run_demo()
     elif choice == "4":
         AgentDemo().run_demo()
     elif choice == "5":
@@ -823,6 +830,7 @@ def main():
             test.test_ollama()
     else:
         print("再见！")
+
 
 if __name__ == "__main__":
     main()
