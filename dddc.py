@@ -212,8 +212,58 @@ class IdiomSolitaire:
             return False
         return prev_idiom[-1] == next_idiom[0]
 
+    def get_available_idioms(self, start_char: str, used_idioms: Set[str]) -> List[str]:
+        """获取可用的成语列表"""
+        available = self.get_idioms_by_first_char(start_char)
+        return [a for a in available if a not in used_idioms]
+
+    def ai_choose_idiom(self, start_char: str, used_idioms: Set[str], client) -> Optional[str]:
+        """AI选择接龙成语"""
+        available = self.get_available_idioms(start_char, used_idioms)
+
+        if not available:
+            return None
+
+        # 如果可用成语较少，直接随机选择
+        if len(available) <= 5:
+            return random.choice(available)
+
+        # 让AI选择合适的成语
+        prompt = f"""你正在玩成语接龙游戏。需要接龙以"{start_char}"开头的成语。
+请从以下成语中选择一个进行接龙，只回复一个成语，不要有其他内容：
+
+可选的成语有: {available[:30]}
+
+请选择一个成语回复："""
+
+        try:
+            response = client.chat.completions.create(
+                model=Config.MODEL_NAME,
+                messages=[
+                    {"role": "system", "content": "你是一个成语接龙专家。请只回复一个成语，不要有其他内容。"},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=50,
+                temperature=0.5
+            )
+
+            ai_idiom = response.choices[0].message.content.strip()
+            # 清理可能的标点符号
+            ai_idiom = re.sub(r'[^\u4e00-\u9fff]', '', ai_idiom)
+
+            # 验证AI回答的成语
+            if ai_idiom in available:
+                return ai_idiom
+            else:
+                # 如果AI选的成语无效，随机选一个
+                return random.choice(available) if available else None
+
+        except Exception as e:
+            print(f"AI调用失败: {e}")
+            return random.choice(available) if available else None
+
     def run_game(self):
-        """运行成语接龙游戏"""
+        """运行成语接龙游戏（命令行版本）"""
         if not self.idioms:
             print("❌ 成语文档未加载，请确保 cyjl.txt 文件存在")
             return
@@ -224,9 +274,10 @@ class IdiomSolitaire:
         print("游戏规则:")
         print("1. 玩家输入一个成语，AI接龙")
         print("2. AI回答的成语必须以玩家成语的最后一个字开头")
-        print("3. 所有成语必须在成语文档中存在")
-        print("4. 如果AI回答的成语不在文档中，AI判负")
-        print("5. 输入 'quit' 退出游戏")
+        print("3. 玩家继续接AI的成语，如此轮流进行")
+        print("4. 所有成语必须在成语文档中存在")
+        print("5. 如果某方无法接龙，则判负")
+        print("6. 输入 'quit' 退出游戏")
         print("=" * 50)
 
         # 初始化LLM客户端
@@ -238,107 +289,197 @@ class IdiomSolitaire:
             print(f"❌ AI连接失败: {e}")
             return
 
-        used_idioms = set()  # 记录已使用的成语
-
+        # 游戏主循环 - 每局结束后可以重新开始
         while True:
-            # 玩家输入
-            print("\n" + "-" * 30)
-            player_input = input("🎯 请输入成语: ").strip()
+            used_idioms = set()  # 记录已使用的成语
+            current_last_char = None
+            turn = "player"  # player 或 ai
 
-            if player_input.lower() in ['quit', 'exit', 'q']:
-                print("👋 游戏结束，再见！")
+            # 随机决定谁先开始
+            if random.choice([True, False]):
+                print("\n🎲 玩家先开始！")
+                turn = "player"
+            else:
+                print("\n🎲 AI先开始！")
+                turn = "ai"
+
+            # 开始一局游戏
+            game_over = False
+            while not game_over:
+                if turn == "player":
+                    print("\n" + "-" * 30)
+                    player_input = input("🎯 请输入成语: ").strip()
+
+                    if player_input.lower() in ['quit', 'exit', 'q']:
+                        print("👋 游戏结束，再见！")
+                        return
+
+                    # 验证玩家输入的成语
+                    if not self.is_valid_idiom(player_input):
+                        print(f"❌ 错误: '{player_input}' 不在成语文档中，你输了！")
+                        game_over = True
+                        break
+
+                    # 检查是否重复使用
+                    if player_input in used_idioms:
+                        print(f"⚠️  '{player_input}' 已经使用过了，你输了！")
+                        game_over = True
+                        break
+
+                    # 检查接龙规则（如果不是第一轮）
+                    if current_last_char is not None:
+                        if not self.check_connection(current_last_char, player_input):
+                            print(f"❌ 错误: '{player_input}' 不以 '{current_last_char[-1]}' 开头，你输了！")
+                            game_over = True
+                            break
+
+                    print(f"✅ 玩家: {player_input}")
+                    used_idioms.add(player_input)
+                    current_last_char = player_input
+                    turn = "ai"
+
+                else:  # AI回合
+                    if current_last_char is None:
+                        # AI先手，随机选一个成语
+                        print("\n🤖 AI思考中...")
+                        available = list(self.idioms)
+                        # 排除已使用的
+                        available = [a for a in available if a not in used_idioms]
+                        ai_idiom = random.choice(available) if available else None
+                    else:
+                        # AI需要接龙
+                        print("\n🤖 AI思考中...")
+                        last_char = self.get_last_char(current_last_char)
+                        ai_idiom = self.ai_choose_idiom(last_char, used_idioms, client)
+
+                    if ai_idiom is None:
+                        print(f"❌ AI无法接龙，AI认输！玩家获胜！")
+                        game_over = True
+                        break
+
+                    # 验证AI回答
+                    if not self.is_valid_idiom(ai_idiom):
+                        print(f"❌ AI回答 '{ai_idiom}' 不在成语文档中，AI判负！玩家获胜！")
+                        game_over = True
+                        break
+
+                    if ai_idiom in used_idioms:
+                        print(f"⚠️  AI回答 '{ai_idiom}' 已经使用过了，AI判负！玩家获胜！")
+                        game_over = True
+                        break
+
+                    # 检查接龙规则（如果不是第一轮）
+                    if current_last_char is not None:
+                        last_char = self.get_last_char(current_last_char)
+                        if not self.check_connection(last_char, ai_idiom):
+                            print(f"❌ AI回答 '{ai_idiom}' 不以 '{last_char}' 开头，AI判负！玩家获胜！")
+                            game_over = True
+                            break
+
+                    print(f"🤖 AI: {ai_idiom}")
+                    used_idioms.add(ai_idiom)
+                    current_last_char = ai_idiom
+                    turn = "player"
+
+                    # 显示剩余可接龙的成语数量
+                    if current_last_char:
+                        remaining = self.get_available_idioms(self.get_last_char(current_last_char), used_idioms)
+                        print(f"📊 剩余可接龙成语: {len(remaining)} 个")
+
+            # 游戏结束，询问是否重新开始
+            print("\n" + "=" * 30)
+            replay = input("🎮 是否开始新的一局？(y/n): ").strip().lower()
+            if replay != 'y':
+                print("👋 感谢游玩，再见！")
                 break
-
-            # 验证玩家输入的成语
-            if not self.is_valid_idiom(player_input):
-                print(f"❌ 错误: '{player_input}' 不在成语文档中，你输了！")
-                print(f"   请使用文档中的成语进行接龙")
-                continue
-
-            # 检查是否重复使用
-            if player_input in used_idioms:
-                print(f"⚠️  '{player_input}' 已经使用过了，请换一个成语")
-                continue
-
-            used_idioms.add(player_input)
-            print(f"✅ 玩家: {player_input}")
-
-            # 获取最后一个字
-            last_char = self.get_last_char(player_input)
-            print(f"📝 最后一个字: '{last_char}'")
-
-            # 获取可用的接龙成语
-            available = self.get_idioms_by_first_char(last_char)
-            available = [a for a in available if a not in used_idioms]
-
-            if not available:
-                print(f"❌ AI无法接龙，AI认输！玩家获胜！")
-                print(f"   没有以 '{last_char}' 开头的成语了")
-                continue
-
-            # 让AI选择接龙的成语
-            print("\n🤖 AI思考中...")
-
-            # 构建提示词，让AI选择合适的成语
-            prompt = f"""你正在玩成语接龙游戏。当前成语是: "{player_input}"，以"{last_char}"结尾。
-请选择一个以"{last_char}"开头的成语进行接龙。
-
-可选的成语有: {available[:30]}
-
-请只回复一个成语，不要有其他内容。回复的成语必须是上面列表中的一个。"""
-
-            try:
-                response = client.chat.completions.create(
-                    model=Config.MODEL_NAME,
-                    messages=[
-                        {"role": "system", "content": "你是一个成语接龙专家。请只回复一个成语，不要有其他内容。"},
-                        {"role": "user", "content": prompt}
-                    ],
-                    max_tokens=50,
-                    temperature=0.5
-                )
-
-                ai_idiom = response.choices[0].message.content.strip()
-
-                # 清理可能的标点符号
-                ai_idiom = re.sub(r'[^\u4e00-\u9fff]', '', ai_idiom)
-
-                # 验证AI回答的成语
-                if not ai_idiom:
-                    print(f"❌ AI回答为空，AI判负！")
-                    print(f"   玩家获胜！")
-                    continue
-
-                if not self.is_valid_idiom(ai_idiom):
-                    print(f"❌ AI回答 '{ai_idiom}' 不在成语文档中，AI判负！")
-                    print(f"   AI输了！玩家获胜！")
-                    continue
-
-                if ai_idiom in used_idioms:
-                    print(f"⚠️  AI回答 '{ai_idiom}' 已经使用过了，AI判负！")
-                    continue
-
-                # 检查接龙规则
-                if not self.check_connection(player_input, ai_idiom):
-                    print(f"❌ AI回答 '{ai_idiom}' 不以 '{last_char}' 开头，AI判负！")
-                    continue
-
-                print(f"🤖 AI: {ai_idiom}")
-                used_idioms.add(ai_idiom)
-
-                # 显示剩余可接龙的成语数量
-                remaining = self.get_idioms_by_first_char(ai_idiom[-1])
-                remaining = [r for r in remaining if r not in used_idioms]
-                print(f"📊 剩余可接龙成语: {len(remaining)} 个")
-
-            except Exception as e:
-                print(f"❌ AI调用失败: {e}")
-                print(f"   AI判负！玩家获胜！")
-                continue
+            print("\n" + "=" * 50)
+            print("🎮 新的一局开始！")
+            print("=" * 50)
 
     def run_demo(self):
         """运行游戏演示（与接口兼容）"""
         self.run_game()
+
+    # ==================== Web服务接口方法 ====================
+    def get_game_state(self, used_idioms: list, last_idiom: str = None, current_turn: str = "player") -> dict:
+        """获取游戏状态"""
+        return {
+            "idioms_count": len(self.idioms),
+            "used_idioms": used_idioms,
+            "last_idiom": last_idiom,
+            "current_turn": current_turn,
+            "last_char": self.get_last_char(last_idiom) if last_idiom else None
+        }
+
+    def validate_player_idiom(self, idiom: str, last_idiom: str = None, used_idioms: Set[str] = None) -> dict:
+        """验证玩家输入的成语"""
+        if not idiom:
+            return {"valid": False, "reason": "请输入成语"}
+
+        if not self.is_valid_idiom(idiom):
+            return {"valid": False, "reason": f"'{idiom}' 不在成语文档中"}
+
+        if used_idioms and idiom in used_idioms:
+            return {"valid": False, "reason": f"'{idiom}' 已经使用过了"}
+
+        if last_idiom:
+            expected_char = self.get_last_char(last_idiom)
+            if idiom[0] != expected_char:
+                return {"valid": False, "reason": f"'{idiom}' 不以 '{expected_char}' 开头"}
+
+        return {"valid": True, "reason": ""}
+
+    def get_ai_idiom(self, last_char: str, used_idioms: Set[str]) -> dict:
+        """获取AI的接龙成语（供Web服务使用）"""
+        available = self.get_available_idioms(last_char, used_idioms)
+
+        if not available:
+            return {"success": False, "idiom": None, "reason": f"没有以 '{last_char}' 开头的可用成语"}
+
+        # 初始化LLM客户端
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=Config.API_KEY, base_url=Config.OLLAMA_URL)
+        except Exception as e:
+            # 如果无法连接AI，随机选择一个
+            return {"success": True, "idiom": random.choice(available), "reason": ""}
+
+        # 如果可用成语较少，直接随机选择
+        if len(available) <= 5:
+            return {"success": True, "idiom": random.choice(available), "reason": ""}
+
+        # 让AI选择合适的成语
+        prompt = f"""你正在玩成语接龙游戏。需要接龙以"{last_char}"开头的成语。
+请从以下成语中选择一个进行接龙，只回复一个成语，不要有其他内容：
+
+可选的成语有: {available[:30]}
+
+请选择一个成语回复："""
+
+        try:
+            response = client.chat.completions.create(
+                model=Config.MODEL_NAME,
+                messages=[
+                    {"role": "system", "content": "你是一个成语接龙专家。请只回复一个成语，不要有其他内容。"},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=50,
+                temperature=0.5
+            )
+
+            ai_idiom = response.choices[0].message.content.strip()
+            # 清理可能的标点符号
+            ai_idiom = re.sub(r'[^\u4e00-\u9fff]', '', ai_idiom)
+
+            # 验证AI回答的成语
+            if ai_idiom in available:
+                return {"success": True, "idiom": ai_idiom, "reason": ""}
+            else:
+                # 如果AI选的成语无效，随机选一个
+                return {"success": True, "idiom": random.choice(available), "reason": ""}
+
+        except Exception as e:
+            return {"success": True, "idiom": random.choice(available), "reason": ""}
 
 
 # ==================== Agent代理模块 ====================
@@ -481,17 +622,28 @@ class FastAPIServer:
         self.app = None
         self.server_thread = None
         self.running = False
+        self.idiom_game = IdiomSolitaire()  # 创建成语接龙游戏实例
 
     def create_app(self):
         """创建FastAPI应用"""
         try:
             from fastapi import FastAPI, Body
             from fastapi.responses import StreamingResponse
+            from fastapi.middleware.cors import CORSMiddleware
             from openai import AsyncOpenAI
             from typing import List
             import uvicorn
 
             app = FastAPI(title="ChatBot API", description="基于Qwen2.5的聊天机器人")
+
+            # 添加CORS中间件
+            app.add_middleware(
+                CORSMiddleware,
+                allow_origins=["*"],
+                allow_credentials=True,
+                allow_methods=["*"],
+                allow_headers=["*"],
+            )
 
             # 初始化OpenAI客户端
             client = AsyncOpenAI(api_key=Config.API_KEY, base_url=Config.OLLAMA_URL)
@@ -500,6 +652,7 @@ class FastAPIServer:
             async def root():
                 return {"message": "ChatBot API服务运行中", "status": "ok"}
 
+            # ==================== 聊天API ====================
             @app.post("/chat")
             async def chat(
                     query: str = Body(..., description="用户输入"),
@@ -540,6 +693,48 @@ class FastAPIServer:
                     return StreamingResponse(generate(), media_type="text/plain")
                 else:
                     return {"response": response.choices[0].message.content}
+
+            # ==================== 成语接龙API ====================
+            @app.get("/idiom/game_state")
+            async def get_game_state():
+                """获取游戏初始状态"""
+                return {
+                    "success": True,
+                    "idioms_count": len(self.idiom_game.idioms),
+                    "message": f"成语库加载完成，共{len(self.idiom_game.idioms)}个成语"
+                }
+
+            @app.post("/idiom/validate")
+            async def validate_idiom(
+                    idiom: str = Body(..., description="玩家输入的成语"),
+                    last_idiom: str = Body(None, description="上一个成语"),
+                    used_idioms: List[str] = Body([], description="已使用的成语列表")
+            ):
+                """验证玩家输入的成语"""
+                result = self.idiom_game.validate_player_idiom(idiom, last_idiom, set(used_idioms))
+                return result
+
+            @app.post("/idiom/ai_move")
+            async def ai_move(
+                    last_char: str = Body(..., description="需要接龙的首字"),
+                    used_idioms: List[str] = Body([], description="已使用的成语列表")
+            ):
+                """获取AI的接龙成语"""
+                result = self.idiom_game.get_ai_idiom(last_char, set(used_idioms))
+                return result
+
+            @app.get("/idiom/available")
+            async def get_available(
+                    start_char: str,
+                    used_idioms: List[str] = Body([], description="已使用的成语列表")
+            ):
+                """获取可用的成语列表"""
+                available = self.idiom_game.get_available_idioms(start_char, set(used_idioms))
+                return {
+                    "success": True,
+                    "available_count": len(available),
+                    "available": available[:50]  # 只返回前50个
+                }
 
             @app.get("/health")
             async def health():
@@ -583,68 +778,360 @@ class StreamlitUI:
 
     @staticmethod
     def get_code():
-        """获取Streamlit前端代码"""
+        """获取Streamlit前端代码（包含成语接龙）"""
         return '''
 import streamlit as st
 import requests
+import json
+import random
 
-BACKEND_URL = "http://localhost:6066/chat"
+BACKEND_URL = "http://localhost:6066"
 
-st.set_page_config(page_title="ChatBot", page_icon="🤖", layout="centered")
-st.title("🤖 聊天机器人")
+st.set_page_config(page_title="智能应用平台", page_icon="🤖", layout="wide")
 
-def clear_chat():
-    st.session_state.history = []
+# 侧边栏选择功能
+st.sidebar.title("📋 功能选择")
+app_mode = st.sidebar.radio(
+    "选择功能",
+    ["💬 智能聊天", "🎮 成语接龙游戏"],
+    index=0
+)
 
-with st.sidebar:
-    st.title("⚙️ 设置")
-    sys_prompt = st.text_input("系统提示词:", value="You are a helpful assistant.")
-    history_len = st.slider("保留历史对话轮数:", 1, 10, 1)
-    temperature = st.slider("temperature:", 0.01, 2.0, 0.5, 0.01)
-    top_p = st.slider("top_p:", 0.01, 1.0, 0.5, 0.01)
-    max_tokens = st.slider("max_tokens:", 256, 4096, 1024, 8)
-    stream = st.checkbox("流式输出", True)
-    st.button("清空聊天历史", on_click=clear_chat)
+# ==================== 智能聊天模块 ====================
+if app_mode == "💬 智能聊天":
+    st.title("🤖 智能聊天机器人")
+    st.caption("基于Qwen2.5的对话助手")
 
-if "history" not in st.session_state:
-    st.session_state.history = []
+    def clear_chat():
+        st.session_state.chat_history = []
 
-for msg in st.session_state.history:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
+    with st.sidebar:
+        st.markdown("---")
+        st.title("⚙️ 聊天设置")
+        sys_prompt = st.text_input("系统提示词:", value="You are a helpful assistant.")
+        history_len = st.slider("保留历史对话轮数:", 1, 10, 1)
+        temperature = st.slider("temperature:", 0.01, 2.0, 0.5, 0.01)
+        top_p = st.slider("top_p:", 0.01, 1.0, 0.5, 0.01)
+        max_tokens = st.slider("max_tokens:", 256, 4096, 1024, 8)
+        stream = st.checkbox("流式输出", True)
+        st.button("清空聊天历史", on_click=clear_chat)
 
-if prompt := st.chat_input("来和我聊天~~~"):
-    with st.chat_message("user"):
-        st.markdown(prompt)
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
 
-    data = {
-        "query": prompt,
-        "sys_prompt": sys_prompt,
-        "history_len": history_len,
-        "history": st.session_state.history,
-        "temperature": temperature,
-        "top_p": top_p,
-        "max_tokens": max_tokens,
-        "stream": stream
-    }
+    # 显示聊天历史
+    for msg in st.session_state.chat_history:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
 
-    response = requests.post(BACKEND_URL, json=data, stream=True)
+    # 聊天输入
+    if prompt := st.chat_input("来和我聊天~~~"):
+        with st.chat_message("user"):
+            st.markdown(prompt)
 
-    if response.status_code == 200:
-        chunks = ""
-        placeholder = st.chat_message("assistant")
-        text = placeholder.markdown("")
+        data = {
+            "query": prompt,
+            "sys_prompt": sys_prompt,
+            "history_len": history_len,
+            "history": st.session_state.chat_history,
+            "temperature": temperature,
+            "top_p": top_p,
+            "max_tokens": max_tokens,
+            "stream": stream
+        }
 
-        if stream:
-            for chunk in response.iter_content(decode_unicode=True):
-                chunks += chunk
+        response = requests.post(f"{BACKEND_URL}/chat", json=data, stream=True)
+
+        if response.status_code == 200:
+            chunks = ""
+            placeholder = st.chat_message("assistant")
+            text = placeholder.markdown("")
+
+            if stream:
+                for chunk in response.iter_content(decode_unicode=True):
+                    chunks += chunk
+                    text.markdown(chunks)
+            else:
+                chunks = response.json().get("response", "")
                 text.markdown(chunks)
-        else:
-            chunks = response.json().get("response", "")
-            text.markdown(chunks)
 
-        st.session_state.history.append({"role": "user", "content": prompt})
-        st.session_state.history.append({"role": "assistant", "content": chunks})
+            st.session_state.chat_history.append({"role": "user", "content": prompt})
+            st.session_state.chat_history.append({"role": "assistant", "content": chunks})
+
+# ==================== 成语接龙游戏模块 ====================
+else:
+    st.title("🎮 成语接龙游戏")
+    st.caption("与AI进行成语接龙对决，轮流接龙，无法接龙者判负！")
+
+    # 初始化游戏状态
+    def reset_game():
+        """重置游戏状态"""
+        st.session_state.used_idioms = []
+        st.session_state.last_idiom = None
+        st.session_state.game_over = False
+        st.session_state.winner = None
+        st.session_state.game_message = ""
+        # 随机决定谁先开始
+        if st.session_state.get("random_turn", True):
+            st.session_state.current_turn = random.choice(["player", "ai"])
+            st.session_state.game_message = f"🎲 {'玩家' if st.session_state.current_turn == 'player' else 'AI'}先开始！"
+        else:
+            st.session_state.current_turn = "player"
+            st.session_state.game_message = "🎲 玩家先开始！"
+        st.session_state.waiting_for_ai = False
+        st.session_state.player_input_value = ""  # 清空输入框的值
+
+    # 初始化session state
+    if "game_initialized" not in st.session_state:
+        st.session_state.game_initialized = False
+        st.session_state.used_idioms = []
+        st.session_state.last_idiom = None
+        st.session_state.current_turn = "player"
+        st.session_state.game_over = False
+        st.session_state.winner = None
+        st.session_state.game_message = ""
+        st.session_state.idioms_count = 0
+        st.session_state.random_turn = True
+        st.session_state.waiting_for_ai = False
+        st.session_state.player_input_value = ""
+
+    # 初始化游戏（加载成语库）
+    if not st.session_state.game_initialized:
+        with st.spinner("加载成语库..."):
+            try:
+                response = requests.get(f"{BACKEND_URL}/idiom/game_state")
+                if response.status_code == 200:
+                    data = response.json()
+                    st.session_state.idioms_count = data.get("idioms_count", 0)
+                    st.session_state.game_initialized = True
+                    # 随机决定先手
+                    if st.session_state.random_turn:
+                        st.session_state.current_turn = random.choice(["player", "ai"])
+                        st.session_state.game_message = f"🎲 {'玩家' if st.session_state.current_turn == 'player' else 'AI'}先开始！"
+                    else:
+                        st.session_state.current_turn = "player"
+                        st.session_state.game_message = "🎲 玩家先开始！"
+                    st.success(f"✅ 成语库加载完成，共{st.session_state.idioms_count}个成语！")
+                else:
+                    st.error("无法连接到后端服务，请确保后端已启动")
+            except Exception as e:
+                st.error(f"连接失败: {e}")
+
+    # 游戏规则说明
+    with st.expander("📖 游戏规则"):
+        st.markdown("""
+        **成语接龙游戏规则：**
+        1. 玩家和AI轮流进行成语接龙
+        2. 每个成语的最后一个字必须与下一个成语的第一个字相同
+        3. 所有成语必须在成语库中存在
+        4. 已经使用过的成语不能重复使用
+        5. 如果某方无法接龙（没有可用的成语），则判负
+        6. 游戏结束后会自动重置并开始新的一局
+        """)
+
+    # 侧边栏游戏信息
+    with st.sidebar:
+        st.markdown("---")
+        st.subheader("🎮 游戏信息")
+        st.metric("成语库数量", st.session_state.idioms_count)
+        st.metric("已使用成语", len(st.session_state.used_idioms))
+        
+        if st.session_state.last_idiom and not st.session_state.game_over:
+            last_char = st.session_state.last_idiom[-1]
+            st.info(f"📝 最后一个字: **{last_char}**")
+            st.info(f"🎯 需要以 **{last_char}** 开头接龙")
+        
+        st.markdown("---")
+        
+        # 游戏设置
+        st.subheader("⚙️ 游戏设置")
+        st.session_state.random_turn = st.checkbox("随机决定先手", value=st.session_state.random_turn)
+        
+        # 重置游戏按钮
+        if st.button("🔄 新的一局"):
+            reset_game()
+            st.rerun()
+        
+        # 显示已使用的成语
+        if st.session_state.used_idioms:
+            st.markdown("---")
+            st.subheader("📜 已使用成语")
+            for i, idiom in enumerate(st.session_state.used_idioms[-15:], 1):
+                st.text(f"{i}. {idiom}")
+
+    # 游戏主界面 - 使用两列布局
+    col1, col2 = st.columns([3, 1])
+
+    with col1:
+        # 显示游戏状态区域
+        game_status_placeholder = st.empty()
+        
+        # 显示游戏结果和当前状态
+        if st.session_state.game_over:
+            if st.session_state.winner == "player":
+                game_status_placeholder.success(f"🎉 恭喜！玩家获胜！{st.session_state.game_message}")
+            elif st.session_state.winner == "ai":
+                game_status_placeholder.error(f"😢 AI获胜！{st.session_state.game_message}")
+            else:
+                game_status_placeholder.info(f"游戏结束: {st.session_state.game_message}")
+            
+            # 游戏结束后显示开始新游戏按钮
+            if st.button("🎮 开始新游戏", key="new_game_btn", use_container_width=True):
+                reset_game()
+                st.rerun()
+        else:
+            # 显示当前回合
+            if st.session_state.current_turn == "player":
+                game_status_placeholder.info("🎯 **当前回合：玩家**")
+            else:
+                game_status_placeholder.warning("🤖 **当前回合：AI思考中...**")
+            
+            # 显示上一个成语
+            if st.session_state.last_idiom:
+                st.success(f"📖 上一个成语: **{st.session_state.last_idiom}**")
+                st.info(f"🔤 需要以 **{st.session_state.last_idiom[-1]}** 开头的成语")
+            else:
+                st.info("🎲 游戏开始，请输入第一个成语")
+
+    with col2:
+        # 玩家输入区域
+        if not st.session_state.game_over:
+            if st.session_state.current_turn == "player" and not st.session_state.waiting_for_ai:
+                # 使用 session_state 来存储输入框的值，避免被清空
+                player_input = st.text_input(
+                    "📝 请输入成语:", 
+                    key="player_input_widget",
+                    value=st.session_state.player_input_value,
+                    placeholder="例如: 一心一意"
+                )
+                submit = st.button("✅ 提交", type="primary", use_container_width=True)
+                
+                if submit and player_input:
+                    with st.spinner("验证中..."):
+                        # 验证玩家输入的成语
+                        validate_data = {
+                            "idiom": player_input,
+                            "last_idiom": st.session_state.last_idiom,
+                            "used_idioms": st.session_state.used_idioms
+                        }
+                        response = requests.post(f"{BACKEND_URL}/idiom/validate", json=validate_data)
+                        
+                        if response.status_code == 200:
+                            result = response.json()
+                            if result["valid"]:
+                                # 有效的成语
+                                st.session_state.used_idioms.append(player_input)
+                                st.session_state.last_idiom = player_input
+                                st.session_state.game_message = f"玩家输入: {player_input}"
+                                st.session_state.player_input_value = ""  # 清空输入
+                                
+                                # 检查AI是否还能接龙
+                                last_char = player_input[-1]
+                                ai_check_data = {
+                                    "last_char": last_char,
+                                    "used_idioms": st.session_state.used_idioms
+                                }
+                                ai_response = requests.post(f"{BACKEND_URL}/idiom/ai_move", json=ai_check_data)
+                                
+                                if ai_response.status_code == 200:
+                                    ai_result = ai_response.json()
+                                    if not ai_result["success"] or ai_result["idiom"] is None:
+                                        # AI无法接龙，玩家获胜，游戏结束并自动重置
+                                        st.session_state.game_over = True
+                                        st.session_state.winner = "player"
+                                        st.session_state.game_message = "AI无法接龙，玩家获胜！"
+                                        st.success("🎉 恭喜获胜！即将开始新游戏...")
+                                        st.rerun()
+                                    else:
+                                        # 切换到AI回合
+                                        st.session_state.current_turn = "ai"
+                                        st.session_state.waiting_for_ai = True
+                                        st.rerun()
+                            else:
+                                st.error(f"❌ {result['reason']}")
+                        else:
+                            st.error("验证失败，请重试")
+                
+                # 提示信息
+                if st.session_state.last_idiom:
+                    st.caption(f"💡 提示：成语必须以 '{st.session_state.last_idiom[-1]}' 开头")
+            else:
+                # AI回合或等待AI响应
+                if st.session_state.waiting_for_ai or st.session_state.current_turn == "ai":
+                    with st.spinner("🤖 AI正在思考中..."):
+                        # 执行AI回合
+                        if st.session_state.last_idiom:
+                            last_char = st.session_state.last_idiom[-1]
+                            ai_data = {
+                                "last_char": last_char,
+                                "used_idioms": st.session_state.used_idioms
+                            }
+                        else:
+                            # AI先手，随机选一个成语
+                            ai_data = {
+                                "last_char": "",
+                                "used_idioms": st.session_state.used_idioms
+                            }
+                        
+                        try:
+                            response = requests.post(f"{BACKEND_URL}/idiom/ai_move", json=ai_data)
+                            if response.status_code == 200:
+                                result = response.json()
+                                if result["success"] and result["idiom"]:
+                                    ai_idiom = result["idiom"]
+                                    st.session_state.used_idioms.append(ai_idiom)
+                                    st.session_state.last_idiom = ai_idiom
+                                    st.session_state.game_message = f"AI输入: {ai_idiom}"
+                                    
+                                    # 检查玩家是否还能接龙
+                                    last_char = ai_idiom[-1]
+                                    player_check_data = {
+                                        "idiom": "",
+                                        "last_idiom": ai_idiom,
+                                        "used_idioms": st.session_state.used_idioms
+                                    }
+                                    # 获取可用的接龙成语
+                                    available_response = requests.get(
+                                        f"{BACKEND_URL}/idiom/available",
+                                        params={"start_char": last_char},
+                                        json={"used_idioms": st.session_state.used_idioms}
+                                    )
+                                    
+                                    if available_response.status_code == 200:
+                                        available_data = available_response.json()
+                                        if available_data.get("available_count", 0) == 0:
+                                            # 玩家无法接龙，AI获胜，游戏结束并自动重置
+                                            st.session_state.game_over = True
+                                            st.session_state.winner = "ai"
+                                            st.session_state.game_message = "玩家无法接龙，AI获胜！"
+                                            st.session_state.waiting_for_ai = False
+                                            st.error("😢 AI获胜！即将开始新游戏...")
+                                            st.rerun()
+                                        else:
+                                            # 切换到玩家回合
+                                            st.session_state.current_turn = "player"
+                                            st.session_state.waiting_for_ai = False
+                                            st.rerun()
+                                    else:
+                                        st.session_state.current_turn = "player"
+                                        st.session_state.waiting_for_ai = False
+                                        st.rerun()
+                                else:
+                                    # AI无法接龙，玩家获胜
+                                    st.session_state.game_over = True
+                                    st.session_state.winner = "player"
+                                    st.session_state.game_message = result.get("reason", "AI无法接龙，玩家获胜！")
+                                    st.session_state.waiting_for_ai = False
+                                    st.success("🎉 恭喜获胜！即将开始新游戏...")
+                                    st.rerun()
+                            else:
+                                st.error("AI响应失败，请手动刷新")
+                                st.session_state.current_turn = "player"
+                                st.session_state.waiting_for_ai = False
+                        except Exception as e:
+                            st.error(f"AI响应异常: {e}")
+                            st.session_state.current_turn = "player"
+                            st.session_state.waiting_for_ai = False
 '''
 
     @staticmethod
