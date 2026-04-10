@@ -1,828 +1,623 @@
 """
-完整RAG+Agent项目 - 基于Qwen2.5
-运行方式：
-1. 确保ollama已启动: ollama run qwen2.5:0.5b
-2. 运行本文件: python app.py
-3. 选择功能:
-   - 选项1: 基础推理
-   - 选项2: 启动Web服务（FastAPI + Streamlit）
-   - 选项3: RAG问答
-   - 选项4: Agent代理
-   - 选项5: 性能测试
+完整RAG+Agent项目 - 集成5个新API（驾考、文本检测、经典语录）
+支持：智能聊天、成语接龙、天气、Agent工具调用、语录独立页面
 """
 
 import os
-import sys
-import json
+import re
 import time
-import requests
+import random
 import threading
-import webbrowser
-from typing import List, Dict, Optional
+import requests
+import subprocess
+import asyncio
+from typing import List, Dict, Set, Any
 from datetime import datetime
+from collections import defaultdict
+from pydantic import Field
 
-# ==================== 检查依赖 ====================
-def check_dependencies():
-    """检查并提示安装缺失的依赖"""
-    missing = []
-    try:
-        import torch
-    except ImportError:
-        missing.append("torch")
-    try:
-        import transformers
-    except ImportError:
-        missing.append("transformers")
-    try:
-        import langchain
-    except ImportError:
-        missing.append("langchain")
-    try:
-        import fastapi
-    except ImportError:
-        missing.append("fastapi")
-    try:
-        import streamlit
-    except ImportError:
-        missing.append("streamlit")
-    try:
-        import openai
-    except ImportError:
-        missing.append("openai")
-
-    if missing:
-        print("缺少以下依赖，请先安装:")
-        print(f"pip install {' '.join(missing)}")
-        print("\n完整安装命令:")
-        print("pip install torch transformers langchain langchain-openai langchain-community langchain-huggingface fastapi uvicorn streamlit openai sentence-transformers faiss-cpu")
-        return False
-    return True
+# LangChain
+from langchain_openai import ChatOpenAI
+from langchain.agents import AgentExecutor, create_tool_calling_agent
+from langchain.tools import Tool
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain.callbacks.base import BaseCallbackHandler
 
 # ==================== 配置 ====================
 class Config:
-    """配置类"""
-    # 模型配置
-    MODEL_NAME = "qwen2.5:0.5b"  # ollama中的模型名
-    MODEL_PATH = "models/Qwen/Qwen2.5-0.5B-Instruct"  # 本地模型路径
-
-    # API配置
-    OLLAMA_URL = "http://localhost:11434/v1"
-    API_KEY = "ollama"
-
-    # 服务配置
+    DEEPSEEK_API_KEY = "sk-8454f30b99cc4305a20ea976f5c3f9ac"
+    DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
+    DEEPSEEK_MODEL = "deepseek-chat"
     BACKEND_PORT = 6066
-    STREAMLIT_PORT = 8501
+    IDIOM_FILE = "cyjl.txt"
+    WEATHER_API_KEY = "SXd4viN_pwVdcogzD"
 
-    # RAG配置
-    CHUNK_SIZE = 200
-    CHUNK_OVERLAP = 20
-    EMBEDDING_MODEL = "models/AI-ModelScope/bge-large-zh-v1_5"
 
-# ==================== 基础推理模块 ====================
-# ==================== 基础推理模块（使用Ollama API）====================
-class BasicInference:
-    """基础推理类 - 使用Ollama API"""
+# ==================== 原有工具函数 ====================
+def query_weather(city: str) -> str:
+    city = city.strip().split('\n')[0]
+    url = f"https://api.seniverse.com/v3/weather/now.json?key={Config.WEATHER_API_KEY}&location={city}&language=zh-Hans&unit=c"
+    try:
+        r = requests.get(url, timeout=8)
+        if r.status_code == 200:
+            data = r.json()
+            weather = data["results"][0]["now"]["text"]
+            temp = data["results"][0]["now"]["temperature"]
+            return f"{city}的天气是{weather}，温度{temp}℃"
+        else:
+            return f"无法获取{city}的天气"
+    except Exception as e:
+        return f"查询失败: {e}"
 
+def get_current_time(_=None) -> str:
+    return datetime.now().strftime("%Y年%m月%d日 %H:%M:%S")
+
+def calculate(expr: str) -> str:
+    try:
+        allowed = {"abs":abs, "round":round, "max":max, "min":min, "log": lambda x: __import__('math').log(x)}
+        result = eval(expr, {"__builtins__":{}}, allowed)
+        return f"计算结果: {result}"
+    except Exception as e:
+        return f"计算错误: {e}"
+
+
+# ==================== 新增API工具函数 ====================
+# ==================== 修复后的API工具函数（接受可选参数） ====================
+# ==================== 修复后的API工具函数（接受可选参数） ====================
+def driving_test_quiz(question: str) -> str:
+    """驾考题库咨询 - 使用 POST 请求"""
+    url = "https://api.pearktrue.cn/api/translate/ai/"
+
+    # 尝试 POST JSON 格式
+    try:
+        r = requests.post(url, json={"text": question}, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            if data.get("code") == 200:
+                return data.get("data", "未获取到答案")
+            else:
+                # 尝试 GET 方式
+                pass
+        else:
+            pass
+    except Exception as e:
+        pass
+
+    # 备用：GET 方式，尝试不同参数名
+    for param_name in ["text", "q", "query", "content", "question", "msg"]:
+        try:
+            r = requests.get(url, params={param_name: question}, timeout=10)
+            if r.status_code == 200:
+                data = r.json()
+                if data.get("code") == 200:
+                    return data.get("data", "未获取到答案")
+                elif data.get("code") == 203:
+                    # 参数名不对，继续尝试
+                    continue
+                else:
+                    return f"接口返回: {data.get('msg', '未知错误')}"
+        except:
+            continue
+
+    return "驾考咨询接口暂时无法使用，请稍后重试"
+
+def text_security_check(text: str) -> str:
+    """AI文本违规检测"""
+    url = "https://api.pearktrue.cn/api/text_security"
+    params = {"text": text}
+    try:
+        r = requests.get(url, params=params, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            if data.get("code") == 200:
+                result = data.get("data", {})
+                return f"检测结果: {result.get('result', '未知')}，详情: {result.get('detail', '')}"
+            else:
+                return f"检测失败: {data.get('msg', '未知错误')}"
+        else:
+            return f"请求失败，状态码: {r.status_code}"
+    except Exception as e:
+        return f"文本检测接口异常: {e}"
+
+def get_tiangou(_=None) -> str:
+    """经典语录：舔狗（接受一个可选参数，忽略它）"""
+    url = "https://api.pearktrue.cn/api/jdyl/tiangou.php"
+    try:
+        r = requests.get(url, timeout=10)
+        if r.status_code == 200:
+            return r.text.strip()
+        else:
+            return f"获取失败，状态码: {r.status_code}"
+    except Exception as e:
+        return f"舔狗语录接口异常: {e}"
+
+def get_qinghua(_=None) -> str:
+    """经典语录：情话（接受一个可选参数，忽略它）"""
+    url = "https://api.pearktrue.cn/api/jdyl/qinghua.php"
+    try:
+        r = requests.get(url, timeout=10)
+        if r.status_code == 200:
+            return r.text.strip()
+        else:
+            return f"获取失败，状态码: {r.status_code}"
+    except Exception as e:
+        return f"情话语录接口异常: {e}"
+
+def get_saohua(_=None) -> str:
+    """经典语录：骚话（接受一个可选参数，忽略它）"""
+    # 注意：骚话API地址为推测，如不正确可自行修改
+    url = "https://api.pearktrue.cn/api/jdyl/saohua.php"
+    try:
+        r = requests.get(url, timeout=10)
+        if r.status_code == 200:
+            return r.text.strip()
+        else:
+            return f"获取失败，状态码: {r.status_code}"
+    except Exception as e:
+        return f"骚话语录接口异常: {e}"
+
+
+# ==================== Agent回调处理器 ====================
+class AgentStepCallbackHandler(BaseCallbackHandler):
     def __init__(self):
-        self.client = None
+        self.steps = []
+    def on_agent_action(self, action, **kwargs):
+        self.steps.append(f"**调用工具**: {action.tool}\n**输入**: {action.tool_input}\n**思考**: {action.log}")
+    def on_tool_end(self, output, **kwargs):
+        self.steps.append(f"**工具返回**: {output}")
+    def on_agent_finish(self, finish, **kwargs):
+        self.steps.append(f"**最终答案**: {finish.return_values['output']}")
 
-    def init_client(self):
-        """初始化Ollama客户端"""
-        try:
-            from openai import OpenAI
-
-            self.client = OpenAI(
-                api_key=Config.API_KEY,
-                base_url=Config.OLLAMA_URL
-            )
-
-            # 测试连接
-            self.client.models.list()
-            print("Ollama连接成功")
-            return True
-        except Exception as e:
-            print(f"Ollama连接失败: {e}")
-            print("请确保Ollama已启动: ollama serve")
-            print("并且已下载模型: ollama pull qwen2.5:0.5b")
-            return False
-
-    def chat(self, prompt: str, system_prompt: str = "You are a helpful assistant.",
-             max_tokens: int = 512) -> str:
-        """对话"""
-        if self.client is None:
-            if not self.init_client():
-                return "Ollama未连接"
-
-        try:
-            response = self.client.chat.completions.create(
-                model=Config.MODEL_NAME,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=max_tokens,
-                temperature=0.7
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            return f"调用失败: {e}"
-
-    def run_demo(self):
-        """运行演示"""
-        if not self.init_client():
-            return
-
-        print("\n=== 基础推理演示（使用Ollama）===")
-        print("输入 'quit' 退出")
-
-        while True:
-            user_input = input("\n你: ")
-            if user_input.lower() in ['quit', 'exit', 'q']:
-                break
-
-            print("助手: ", end="", flush=True)
-            response = self.chat(user_input)
-            print(response)
-
-    def load_model(self):
-        """加载模型"""
-        try:
-            from transformers import AutoModelForCausalLM, AutoTokenizer
-            import torch
-
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            print(f"使用设备: {self.device}")
-
-            print(f"加载模型: {Config.MODEL_PATH}")
-            self.tokenizer = AutoTokenizer.from_pretrained(Config.MODEL_PATH)
-            self.model = AutoModelForCausalLM.from_pretrained(
-                Config.MODEL_PATH,
-                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32
-            ).to(self.device)
-            print("模型加载完成")
-            return True
-        except Exception as e:
-            print(f"模型加载失败: {e}")
-            print("请先运行 download_model.py 下载模型")
-            return False
-
-    def chat(self, prompt: str, system_prompt: str = "You are a helpful assistant.",
-             max_new_tokens: int = 512) -> str:
-        """对话"""
-        if self.model is None:
-            if not self.load_model():
-                return "模型未加载"
-
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": prompt}
-        ]
-
-        text = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-
-        model_inputs = self.tokenizer([text], return_tensors="pt").to(self.device)
-        generated_ids = self.model.generate(
-            model_inputs.input_ids,
-            max_new_tokens=max_new_tokens,
-            do_sample=True,
-            temperature=0.7
-        )
-
-        generated_ids = [output_ids[len(input_ids):] for input_ids, output_ids
-                        in zip(model_inputs.input_ids, generated_ids)]
-        response = self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
-
-        return response
-
-    def run_demo(self):
-        """运行演示"""
-        if not self.load_model():
-            return
-
-        print("\n=== 基础推理演示 ===")
-        print("输入 'quit' 退出")
-
-        while True:
-            user_input = input("\n你: ")
-            if user_input.lower() in ['quit', 'exit', 'q']:
-                break
-
-            print("助手: ", end="", flush=True)
-            response = self.chat(user_input)
-            print(response)
-
-# ==================== RAG问答模块 ====================
-class RAGQA:
-    """RAG问答系统"""
-
-    def __init__(self):
-        self.vector_store = None
-        self.retriever = None
-        self.qa_chain = None
-        self.llm = None
-
-    def init_llm(self):
-        """初始化LLM"""
-        try:
-            from langchain_openai import ChatOpenAI
-            self.llm = ChatOpenAI(
-                openai_api_key=Config.API_KEY,
-                base_url=Config.OLLAMA_URL,
-                model=Config.MODEL_NAME
-            )
-            return True
-        except Exception as e:
-            print(f"LLM初始化失败: {e}")
-            return False
-
-    def create_vector_store(self, documents: List[str]):
-        """创建向量存储"""
-        try:
-            from langchain_huggingface import HuggingFaceEmbeddings
-            from langchain_community.vectorstores import FAISS
-            from langchain.text_splitter import RecursiveCharacterTextSplitter
-
-            # 文本分割
-            text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=Config.CHUNK_SIZE,
-                chunk_overlap=Config.CHUNK_OVERLAP
-            )
-            chunks = text_splitter.create_documents(documents)
-
-            # 创建Embedding
-            embedding = HuggingFaceEmbeddings(model_name=Config.EMBEDDING_MODEL)
-
-            # 创建向量存储
-            self.vector_store = FAISS.from_documents(chunks, embedding)
-            self.retriever = self.vector_store.as_retriever()
-
-            print(f"向量存储创建完成，共{len(chunks)}个文档块")
-            return True
-        except Exception as e:
-            print(f"向量存储创建失败: {e}")
-            return False
-
-    def build_qa_chain(self):
-        """构建问答链"""
-        try:
-            from langchain.chains import RetrievalQA
-            from langchain.prompts import ChatPromptTemplate, SystemMessagePromptTemplate, HumanMessagePromptTemplate
-
-            system_message = SystemMessagePromptTemplate.from_template(
-                "根据以下已知信息回答用户问题。如果不知道答案，就说不知道。\n已知信息{context}"
-            )
-            human_message = HumanMessagePromptTemplate.from_template("用户问题：{question}")
-            chat_prompt = ChatPromptTemplate.from_messages([system_message, human_message])
-
-            self.qa_chain = RetrievalQA.from_chain_type(
-                llm=self.llm,
-                chain_type="stuff",
-                retriever=self.retriever,
-                chain_type_kwargs={"prompt": chat_prompt}
-            )
-            return True
-        except Exception as e:
-            print(f"问答链创建失败: {e}")
-            return False
-
-    def load_document(self, file_path: str) -> List[str]:
-        """加载文档"""
-        try:
-            from langchain_community.document_loaders import TextLoader
-            loader = TextLoader(file_path, encoding="utf-8")
-            docs = loader.load()
-            return [doc.page_content for doc in docs]
-        except Exception as e:
-            print(f"文档加载失败: {e}")
-            return []
-
-    def query(self, question: str) -> str:
-        """查询"""
-        if self.qa_chain is None:
-            return "请先初始化RAG系统"
-
-        try:
-            result = self.qa_chain.invoke(question)
-            return result.get("result", "")
-        except Exception as e:
-            return f"查询失败: {e}"
-
-    def run_demo(self):
-        """运行演示"""
-        if not self.init_llm():
-            return
-
-        print("\n=== RAG问答演示 ===")
-        file_path = input("请输入文档路径（支持txt文件）: ").strip()
-
-        if not os.path.exists(file_path):
-            print("文件不存在")
-            return
-
-        documents = self.load_document(file_path)
-        if not documents:
-            return
-
-        if not self.create_vector_store(documents):
-            return
-
-        if not self.build_qa_chain():
-            return
-
-        print("RAG系统初始化完成，输入 'quit' 退出")
-
-        while True:
-            question = input("\n问题: ")
-            if question.lower() in ['quit', 'exit', 'q']:
-                break
-
-            print("回答: ", end="", flush=True)
-            answer = self.query(question)
-            print(answer)
-
-# ==================== Agent代理模块 ====================
 class AgentDemo:
-    """Agent代理"""
-
     def __init__(self):
         self.agent_executor = None
-        self.tools = []
-
     def init_agent(self):
-        """初始化Agent"""
         try:
-            from langchain_openai import ChatOpenAI
-            from langchain.agents import Tool, create_react_agent, AgentExecutor
-            from langchain_core.prompts import PromptTemplate
-
-            # 初始化LLM
-            llm = ChatOpenAI(
-                openai_api_key=Config.API_KEY,
-                base_url=Config.OLLAMA_URL,
-                model=Config.MODEL_NAME
-            )
-
-            # 定义工具
             tools = [
-                Tool(name="当前时间", func=self.get_current_time, description="获取当前时间，无需输入参数"),
-                Tool(name="计算器", func=self.calculator, description="执行数学计算，例如: 2+3*4"),
+                Tool(name="weather_query", func=query_weather, description="查询城市天气"),
+                Tool(name="current_time", func=get_current_time, description="获取当前时间"),
+                Tool(name="calculator", func=calculate, description="数学计算"),
+                Tool(name="driving_test", func=driving_test_quiz, description="驾考题库咨询，输入驾考相关的问题"),
+                Tool(name="text_security", func=text_security_check, description="检测文本是否包含违规内容，输入需要检测的文本"),
+                Tool(name="tiangou", func=get_tiangou, description="随机获取一条舔狗语录，无需输入参数"),
+                Tool(name="qinghua", func=get_qinghua, description="随机获取一条情话语录，无需输入参数"),
+                Tool(name="saohua", func=get_saohua, description="随机获取一条骚话语录，无需输入参数"),
             ]
-
-            # 添加天气工具（需要API Key）
-            api_key = input("请输入心知天气API Key（没有则跳过，输入n）: ").strip()
-            if api_key and api_key.lower() != 'n':
-                tools.append(Tool(name="天气查询", func=self.create_weather_tool(api_key),
-                                  description="查询城市天气，输入城市名称"))
-
-            # ReAct提示模板
-            template = """请尽可能好地回答以下问题。如果需要，可以适当的使用一些功能。
-
-你有以下工具可用：
-{tools}
-
-请使用以下格式：
-Question: 需要回答的问题。
-Thought: 总是考虑应该做什么以及使用哪些工具。
-Action: 应采取的行动，应为 [{tool_names}] 中的一个。
-Action Input: 行动的输入。
-Observation: 行动的结果。
-...（这个过程可以重复多次）。
-Thought: 我现在知道最终答案了。
-Final Answer: 对原问题的最终答案。
-
-开始！
-Question: {input}
-Thought: {agent_scratchpad}
-"""
-
-            prompt = PromptTemplate.from_template(template)
-            agent = create_react_agent(llm, tools, prompt, stop_sequence=["\nobserv"])
-            self.agent_executor = AgentExecutor.from_agent_and_tools(
-                agent=agent, tools=tools, verbose=True, handle_parsing_errors=True
+            llm = ChatOpenAI(
+                openai_api_key=Config.DEEPSEEK_API_KEY,
+                base_url=Config.DEEPSEEK_BASE_URL,
+                model=Config.DEEPSEEK_MODEL,
+                temperature=0.5,
+                top_p=0.9
             )
-            print("Agent初始化完成")
+            prompt = ChatPromptTemplate.from_messages([
+                ("system", "你是一个有用的AI助手，可以使用以下工具：weather_query（天气）、current_time（时间）、calculator（计算）、driving_test（驾考咨询）、text_security（文本违规检测）、tiangou（舔狗语录）、qinghua（情话语录）、saohua（骚话语录）。请根据用户的问题，选择合适的工具。"),
+                ("user", "{input}"),
+                MessagesPlaceholder(variable_name="agent_scratchpad"),
+            ])
+            agent = create_tool_calling_agent(llm, tools, prompt)
+            self.agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True, handle_parsing_errors=True, max_iterations=3)
+            print("✅ Agent 初始化完成（已集成5个新API工具）")
             return True
         except Exception as e:
             print(f"Agent初始化失败: {e}")
             return False
-
-    def get_current_time(self, _=None) -> str:
-        """获取当前时间"""
-        return datetime.now().strftime("%Y年%m月%d日 %H:%M:%S")
-
-    def calculator(self, expression: str) -> str:
-        """计算器"""
+    def query_with_steps(self, question: str):
+        if not self.agent_executor:
+            return {"answer": "Agent未初始化", "steps": []}
+        cb = AgentStepCallbackHandler()
         try:
-            # 安全评估表达式
-            allowed_names = {"abs": abs, "round": round, "max": max, "min": min}
-            result = eval(expression, {"__builtins__": {}}, allowed_names)
-            return f"计算结果: {result}"
+            result = self.agent_executor.invoke({"input": question}, config={"callbacks": [cb]})
+            return {"answer": result.get("output", ""), "steps": cb.steps}
         except Exception as e:
-            return f"计算失败: {e}"
-
-    def create_weather_tool(self, api_key):
-        """创建天气查询工具"""
-        def weather_query(city: str):
-            try:
-                city = city.split("\n")[0]
-                url = f"https://api.seniverse.com/v3/weather/now.json?key={api_key}&location={city}&language=zh-Hans&unit=c"
-                response = requests.get(url, timeout=10)
-                if response.status_code == 200:
-                    data = response.json()
-                    weather = data["results"][0]["now"]["text"]
-                    tem = data["results"][0]["now"]["temperature"]
-                    return f"{city}的天气是{weather}，温度是{tem}℃"
-                return f"无法获取{city}的天气信息"
-            except Exception as e:
-                return f"查询失败: {e}"
-        return weather_query
-
-    def query(self, question: str) -> str:
-        """查询"""
-        if self.agent_executor is None:
-            return "Agent未初始化"
-
-        try:
-            result = self.agent_executor.invoke({"input": question})
-            return result.get("output", "")
-        except Exception as e:
-            return f"查询失败: {e}"
-
+            return {"answer": f"错误: {e}", "steps": []}
     def run_demo(self):
-        """运行演示"""
         if not self.init_agent():
             return
-
-        print("\n=== Agent代理演示 ===")
-        print("示例问题:")
-        print("1. 现在几点了？")
-        print("2. 计算 2 + 3 * 4")
-        print("3. 成都天气怎么样（需要API Key）")
-        print("输入 'quit' 退出")
-
+        print("\nAgent命令行模式，输入quit退出")
         while True:
-            question = input("\n问题: ")
-            if question.lower() in ['quit', 'exit', 'q']:
-                break
+            q = input("问题: ")
+            if q.lower() in ('quit','exit'): break
+            res = self.query_with_steps(q)
+            print(f"答案: {res['answer']}")
 
-            print("思考中...")
-            answer = self.query(question)
-            print(f"回答: {answer}")
 
-# ==================== FastAPI后端服务 ====================
-class FastAPIServer:
-    """FastAPI后端服务"""
-
+# ==================== 成语接龙（简化，同前）====================
+class IdiomSolitaire:
     def __init__(self):
-        self.app = None
-        self.server_thread = None
-        self.running = False
-
-    def create_app(self):
-        """创建FastAPI应用"""
+        self.idioms = set()
+        self.first_char_map = defaultdict(list)
+        self.load_idioms()
+    def load_idioms(self):
+        if not os.path.exists(Config.IDIOM_FILE):
+            default = ["一心一意","意气风发","发奋图强","强人所难","难能可贵","贵耳贱目","目中无人","人山人海"]
+            for i in default:
+                self.idioms.add(i)
+                self.first_char_map[i[0]].append(i)
+            return True
+        with open(Config.IDIOM_FILE, 'r', encoding='utf-8') as f:
+            for line in f:
+                line=line.strip()
+                if not line: continue
+                w=line.split()[0]
+                if len(w)>=2 and re.match(r'^[\u4e00-\u9fff]+$', w):
+                    self.idioms.add(w)
+                    self.first_char_map[w[0]].append(w)
+        print(f"加载成语 {len(self.idioms)} 个")
+        return True
+    def is_valid(self, w): return w in self.idioms
+    def last_char(self, w): return w[-1] if w else ""
+    def validate(self, w, last, used):
+        if not w: return (False, "空")
+        if not self.is_valid(w): return (False, "不在库")
+        if w in used: return (False, "已使用")
+        if last and w[0] != self.last_char(last): return (False, f"不以'{self.last_char(last)}'开头")
+        return (True, "")
+    def ai_move(self, last_char, used):
+        from openai import OpenAI
+        client = OpenAI(api_key=Config.DEEPSEEK_API_KEY, base_url=Config.DEEPSEEK_BASE_URL)
+        avail = [i for i in self.first_char_map.get(last_char,[]) if i not in used]
+        if not avail: return None
+        if len(avail)<=5: return random.choice(avail)
+        prompt = f"需要接龙以'{last_char}'开头的成语。可选: {avail[:30]}。只回复一个成语："
         try:
-            from fastapi import FastAPI, Body
-            from fastapi.responses import StreamingResponse
-            from openai import AsyncOpenAI
-            from typing import List
-            import uvicorn
-
-            app = FastAPI(title="ChatBot API", description="基于Qwen2.5的聊天机器人")
-
-            # 初始化OpenAI客户端
-            client = AsyncOpenAI(api_key=Config.API_KEY, base_url=Config.OLLAMA_URL)
-
-            @app.get("/")
-            async def root():
-                return {"message": "ChatBot API服务运行中", "status": "ok"}
-
-            @app.post("/chat")
-            async def chat(
-                query: str = Body(..., description="用户输入"),
-                sys_prompt: str = Body("你是一个有用的助手。", description="系统提示词"),
-                history: List = Body([], description="历史对话"),
-                history_len: int = Body(1, description="保留历史对话轮数"),
-                temperature: float = Body(0.5, description="采样温度"),
-                top_p: float = Body(0.5, description="采样概率"),
-                max_tokens: int = Body(1024, description="最大token数"),
-                stream: bool = Body(True, description="是否流式输出")
-            ):
-                # 控制历史记录长度
-                if history_len > 0:
-                    history = history[-2 * history_len:]
-
-                # 构建消息
-                messages = [{"role": "system", "content": sys_prompt}]
-                messages.extend(history)
-                messages.append({"role": "user", "content": query})
-
-                # 发送请求
-                response = await client.chat.completions.create(
-                    model=Config.MODEL_NAME,
-                    messages=messages,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    top_p=top_p,
-                    stream=stream
-                )
-
-                if stream:
-                    async def generate():
-                        async for chunk in response:
-                            chunk_msg = chunk.choices[0].delta.content
-                            if chunk_msg:
-                                yield chunk_msg
-                    return StreamingResponse(generate(), media_type="text/plain")
+            resp = client.chat.completions.create(model=Config.DEEPSEEK_MODEL, messages=[{"role":"system","content":"只回复成语"},{"role":"user","content":prompt}], max_tokens=20)
+            ans = re.sub(r'[^\u4e00-\u9fff]','',resp.choices[0].message.content.strip())
+            return ans if ans in avail else random.choice(avail)
+        except:
+            return random.choice(avail)
+    def run_demo(self):
+        from openai import OpenAI
+        client = OpenAI(api_key=Config.DEEPSEEK_API_KEY, base_url=Config.DEEPSEEK_BASE_URL)
+        print("\n成语接龙，输入quit退出")
+        while True:
+            used=set(); last=None; turn=random.choice(["player","ai"])
+            print(f"\n{'玩家' if turn=='player' else 'AI'}先手")
+            over=False
+            while not over:
+                if turn=="player":
+                    w=input("成语: ").strip()
+                    if w.lower() in ('quit','exit'): return
+                    ok,reason=self.validate(w,last,used)
+                    if not ok: print(f"❌ {reason}，你输了"); break
+                    print(f"✅ {w}")
+                    used.add(w); last=w; turn="ai"
                 else:
-                    return {"response": response.choices[0].message.content}
+                    print("AI思考...")
+                    if last is None:
+                        cand=[i for i in self.idioms if i not in used]
+                        ai_w=random.choice(cand) if cand else None
+                    else:
+                        ai_w=self.ai_move(self.last_char(last), used)
+                    if not ai_w: print("AI无法接龙，你赢了！"); break
+                    if not self.is_valid(ai_w) or ai_w in used or (last and ai_w[0]!=self.last_char(last)):
+                        print("AI违规，你赢了！"); break
+                    print(f"🤖 {ai_w}")
+                    used.add(ai_w); last=ai_w; turn="player"
+            if input("新一局？(y/n): ").lower()!='y': break
 
-            @app.get("/health")
-            async def health():
-                return {"status": "ok"}
 
-            self.app = app
-            return True
-        except Exception as e:
-            print(f"创建FastAPI应用失败: {e}")
-            return False
+# ==================== 基础推理（命令行）====================
+class BasicInference:
+    def __init__(self):
+        from openai import OpenAI
+        self.client = OpenAI(api_key=Config.DEEPSEEK_API_KEY, base_url=Config.DEEPSEEK_BASE_URL)
+    def chat(self, prompt):
+        resp = self.client.chat.completions.create(model=Config.DEEPSEEK_MODEL, messages=[{"role":"user","content":prompt}])
+        return resp.choices[0].message.content
+    def run_demo(self):
+        print("\n基础推理（quit退出）")
+        while True:
+            q=input("你: ")
+            if q.lower() in ('quit','exit'): break
+            print("助手:", self.chat(q))
 
-    def start(self):
-        """启动服务"""
-        if not self.create_app():
-            return False
 
-        try:
-            import uvicorn
+# ==================== FastAPI 后端 ====================
+from fastapi import FastAPI, Body, Query
+from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
+from openai import AsyncOpenAI
+import uvicorn
 
-            def run_server():
-                uvicorn.run(self.app, host="0.0.0.0", port=Config.BACKEND_PORT, log_level="warning")
+app = FastAPI()
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-            self.server_thread = threading.Thread(target=run_server, daemon=True)
-            self.server_thread.start()
-            self.running = True
-            print(f"后端服务已启动: http://localhost:{Config.BACKEND_PORT}")
-            return True
-        except Exception as e:
-            print(f"启动服务失败: {e}")
-            return False
+idiom_game = IdiomSolitaire()
+agent = AgentDemo()
+agent.init_agent()
+async_client = AsyncOpenAI(api_key=Config.DEEPSEEK_API_KEY, base_url=Config.DEEPSEEK_BASE_URL)
 
-    def stop(self):
-        """停止服务"""
-        self.running = False
-        print("服务已停止")
+@app.get("/")
+async def root():
+    return {"status": "ok", "agent_ready": agent.agent_executor is not None}
 
-# ==================== Streamlit前端 ====================
-class StreamlitUI:
-    """Streamlit前端"""
-
-    @staticmethod
-    def get_code():
-        """获取Streamlit前端代码"""
-        return '''
-import streamlit as st
-import requests
-
-BACKEND_URL = "http://localhost:6066/chat"
-
-st.set_page_config(page_title="ChatBot", page_icon="🤖", layout="centered")
-st.title("🤖 聊天机器人")
-
-def clear_chat():
-    st.session_state.history = []
-
-with st.sidebar:
-    st.title("⚙️ 设置")
-    sys_prompt = st.text_input("系统提示词:", value="You are a helpful assistant.")
-    history_len = st.slider("保留历史对话轮数:", 1, 10, 1)
-    temperature = st.slider("temperature:", 0.01, 2.0, 0.5, 0.01)
-    top_p = st.slider("top_p:", 0.01, 1.0, 0.5, 0.01)
-    max_tokens = st.slider("max_tokens:", 256, 4096, 1024, 8)
-    stream = st.checkbox("流式输出", True)
-    st.button("清空聊天历史", on_click=clear_chat)
-
-if "history" not in st.session_state:
-    st.session_state.history = []
-
-for msg in st.session_state.history:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
-
-if prompt := st.chat_input("来和我聊天~~~"):
-    with st.chat_message("user"):
-        st.markdown(prompt)
-    
-    data = {
-        "query": prompt,
-        "sys_prompt": sys_prompt,
-        "history_len": history_len,
-        "history": st.session_state.history,
-        "temperature": temperature,
-        "top_p": top_p,
-        "max_tokens": max_tokens,
-        "stream": stream
-    }
-    
-    response = requests.post(BACKEND_URL, json=data, stream=True)
-    
-    if response.status_code == 200:
-        chunks = ""
-        placeholder = st.chat_message("assistant")
-        text = placeholder.markdown("")
-        
-        if stream:
-            for chunk in response.iter_content(decode_unicode=True):
-                chunks += chunk
-                text.markdown(chunks)
-        else:
-            chunks = response.json().get("response", "")
-            text.markdown(chunks)
-        
-        st.session_state.history.append({"role": "user", "content": prompt})
-        st.session_state.history.append({"role": "assistant", "content": chunks})
-'''
-
-    @staticmethod
-    def run():
-        """运行Streamlit"""
-        import tempfile
-        code = StreamlitUI.get_code()
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as f:
-            f.write(code)
-            temp_file = f.name
-
-        print(f"启动Streamlit前端...")
-        os.system(f'streamlit run "{temp_file}"')
-
-# ==================== 性能测试模块 ====================
-class PerformanceTest:
-    """性能测试"""
-
-    def test_transformers(self):
-        """测试Transformers推理速度"""
-        try:
-            from transformers import AutoModelForCausalLM, AutoTokenizer
-            import torch
-
-            print("\n=== Transformers推理测试 ===")
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-            print("加载模型...")
-            tokenizer = AutoTokenizer.from_pretrained(Config.MODEL_PATH)
-            model = AutoModelForCausalLM.from_pretrained(
-                Config.MODEL_PATH,
-                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32
-            ).to(device)
-
-            prompt = "讲个简短的故事"
-            messages = [{"role": "user", "content": prompt}]
-            text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            model_inputs = tokenizer([text], return_tensors="pt").to(device)
-
-            # 预热
-            _ = model.generate(model_inputs.input_ids, max_new_tokens=50)
-
-            # 正式测试
-            start = time.time()
-            generated = model.generate(model_inputs.input_ids, max_new_tokens=100)
-            end = time.time()
-
-            generated_ids = [output_ids[len(input_ids):] for input_ids, output_ids
-                           in zip(model_inputs.input_ids, generated)]
-            response = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
-
-            num_tokens = len(generated_ids[0])
-            elapsed = end - start
-            print(f"生成token数: {num_tokens}")
-            print(f"耗时: {elapsed:.2f}秒")
-            print(f"速度: {num_tokens/elapsed:.2f} tokens/秒")
-            print(f"响应: {response[:100]}...")
-        except Exception as e:
-            print(f"测试失败: {e}")
-
-    def test_ollama(self):
-        """测试Ollama API速度"""
-        try:
-            from openai import OpenAI
-
-            print("\n=== Ollama API测试 ===")
-            client = OpenAI(api_key=Config.API_KEY, base_url=Config.OLLAMA_URL)
-
-            prompt = "讲个简短的故事"
-
-            # 测试非流式
-            start = time.time()
-            response = client.chat.completions.create(
-                model=Config.MODEL_NAME,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=100,
-                stream=False
-            )
-            end = time.time()
-
-            content = response.choices[0].message.content
-            num_tokens = len(content)
-            elapsed = end - start
-            print(f"非流式 - 生成token数: {num_tokens}, 耗时: {elapsed:.2f}秒, 速度: {num_tokens/elapsed:.2f} tokens/秒")
-
-            # 测试流式
-            start = time.time()
-            response = client.chat.completions.create(
-                model=Config.MODEL_NAME,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=100,
-                stream=True
-            )
-            content = ""
-            for chunk in response:
+@app.post("/chat")
+async def chat(
+    query: str = Body(...),
+    sys_prompt: str = Body("你是一个有用的助手。"),
+    history: List = Body([]),
+    history_len: int = Body(1),
+    temperature: float = Body(0.5),
+    top_p: float = Body(0.5),
+    max_tokens: int = Body(1024),
+    stream: bool = Body(True)
+):
+    if history_len>0:
+        history = history[-2*history_len:]
+    messages = [{"role":"system","content":sys_prompt}] + history + [{"role":"user","content":query}]
+    resp = await async_client.chat.completions.create(
+        model=Config.DEEPSEEK_MODEL, messages=messages,
+        max_tokens=max_tokens, temperature=temperature, top_p=top_p, stream=stream
+    )
+    if stream:
+        async def gen():
+            async for chunk in resp:
                 if chunk.choices[0].delta.content:
-                    content += chunk.choices[0].delta.content
-            end = time.time()
+                    yield chunk.choices[0].delta.content
+        return StreamingResponse(gen(), media_type="text/plain")
+    else:
+        return {"response": resp.choices[0].message.content}
 
-            num_tokens = len(content)
-            elapsed = end - start
-            print(f"流式 - 生成token数: {num_tokens}, 耗时: {elapsed:.2f}秒, 速度: {num_tokens/elapsed:.2f} tokens/秒")
-        except Exception as e:
-            print(f"测试失败: {e}")
+@app.get("/weather")
+async def weather(city: str = Query(...)):
+    result = query_weather(city)
+    return {"success": "无法" not in result, "message": result}
+
+# Agent接口（修复422错误）
+@app.post("/agent")
+async def agent_query(data: dict = Body(...)):
+    try:
+        question = data.get("question")
+        if not question:
+            return {"answer": "缺少 'question' 字段", "steps": []}
+        result = await asyncio.get_event_loop().run_in_executor(None, agent.query_with_steps, question)
+        return result
+    except Exception as e:
+        print(f"Agent接口错误: {e}")
+        return {"answer": f"后端错误: {str(e)}", "steps": []}
+
+# 新增语录接口
+@app.get("/tiangou")
+def tiangou():
+    return {"content": get_tiangou()}
+@app.get("/qinghua")
+def qinghua():
+    return {"content": get_qinghua()}
+@app.get("/saohua")
+def saohua():
+    return {"content": get_saohua()}
+
+# 新增文本检测接口
+@app.post("/text_security")
+def text_security(data: dict = Body(...)):
+    text = data.get("text")
+    if not text:
+        return {"success": False, "message": "缺少 text 参数"}
+    result = text_security_check(text)
+    if "检测结果:" in result:
+        parts = result.split("，")
+        res = parts[0].replace("检测结果:", "").strip()
+        detail = parts[1].replace("详情:", "").strip() if len(parts)>1 else ""
+        return {"success": True, "result": res, "detail": detail}
+    else:
+        return {"success": False, "message": result}
+
+# 成语接龙接口
+@app.get("/idiom/game_state")
+def game_state():
+    return {"idioms_count": len(idiom_game.idioms)}
+@app.post("/idiom/validate")
+def validate_idiom(idiom: str = Body(...), last_idiom: str = Body(None), used_idioms: List[str] = Body([])):
+    ok, reason = idiom_game.validate(idiom, last_idiom, set(used_idioms))
+    return {"valid": ok, "reason": reason}
+@app.post("/idiom/ai_move")
+def ai_move_idiom(last_char: str = Body(...), used_idioms: List[str] = Body([])):
+    result = idiom_game.ai_move(last_char, set(used_idioms))
+    return {"success": result is not None, "idiom": result}
+
+
+# ==================== Streamlit 前端（独立文件，已包含新页面）====================
+def create_streamlit_app():
+    code = '''import streamlit as st
+import requests
+import random
+
+BACKEND = "http://localhost:6066"
+
+st.set_page_config(page_title="智能应用平台", layout="wide")
+mode = st.sidebar.radio("功能", ["聊天", "成语接龙", "天气", "Agent", "经典语录", "文本检测"])
+
+# ---------- 聊天 ----------
+if mode == "聊天":
+    st.title("聊天机器人")
+    if "chat" not in st.session_state:
+        st.session_state.chat = []
+    for msg in st.session_state.chat:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+    if p := st.chat_input("说点什么"):
+        st.session_state.chat.append({"role": "user", "content": p})
+        with st.chat_message("user"):
+            st.markdown(p)
+        data = {"query": p, "sys_prompt": "You are a helpful assistant.", "history": st.session_state.chat[:-1], "history_len": 2}
+        r = requests.post(f"{BACKEND}/chat", json=data, stream=True)
+        if r.status_code == 200:
+            full = ""
+            placeholder = st.chat_message("assistant")
+            text = placeholder.markdown("")
+            for chunk in r.iter_content(decode_unicode=True):
+                full += chunk
+                text.markdown(full)
+            st.session_state.chat.append({"role": "assistant", "content": full})
+
+# ---------- 天气 ----------
+elif mode == "天气":
+    st.title("天气查询")
+    city = st.text_input("城市")
+    if st.button("查询") and city:
+        r = requests.get(f"{BACKEND}/weather", params={"city": city})
+        if r.status_code == 200:
+            data = r.json()
+            if data["success"]:
+                st.success(data["message"])
+            else:
+                st.error(data["message"])
+
+# ---------- 成语接龙 ----------
+elif mode == "成语接龙":
+    st.title("成语接龙")
+    if "g" not in st.session_state:
+        st.session_state.g = {"used": [], "last": None, "turn": None, "over": False}
+    if st.session_state.g["turn"] is None:
+        r = requests.get(f"{BACKEND}/idiom/game_state")
+        if r.status_code == 200:
+            st.session_state.g["turn"] = random.choice(["player", "ai"])
+            st.rerun()
+    if st.session_state.g["over"]:
+        st.success("游戏结束")
+        if st.button("新游戏"):
+            st.session_state.g = {"used": [], "last": None, "turn": random.choice(["player", "ai"]), "over": False}
+            st.rerun()
+    else:
+        st.info(f"回合: {'玩家' if st.session_state.g['turn']=='player' else 'AI'}")
+        if st.session_state.g["last"]:
+            st.info(f"上一个: {st.session_state.g['last']}  需要以 '{st.session_state.g['last'][-1]}' 开头")
+        if st.session_state.g["turn"] == "player":
+            w = st.text_input("成语")
+            if st.button("提交") and w:
+                resp = requests.post(f"{BACKEND}/idiom/validate", json={"idiom": w, "last_idiom": st.session_state.g["last"], "used_idioms": st.session_state.g["used"]})
+                if resp.status_code == 200 and resp.json()["valid"]:
+                    st.session_state.g["used"].append(w)
+                    st.session_state.g["last"] = w
+                    ai_resp = requests.post(f"{BACKEND}/idiom/ai_move", json={"last_char": w[-1], "used_idioms": st.session_state.g["used"]})
+                    if ai_resp.status_code == 200 and ai_resp.json().get("success"):
+                        ai_w = ai_resp.json()["idiom"]
+                        if ai_w:
+                            st.session_state.g["used"].append(ai_w)
+                            st.session_state.g["last"] = ai_w
+                            st.rerun()
+                        else:
+                            st.session_state.g["over"] = True
+                            st.success("AI无法接龙，你赢了！")
+                            st.rerun()
+                    else:
+                        st.error("AI响应失败")
+                else:
+                    st.error(resp.json().get("reason", "无效成语"))
+        else:
+            st.info("AI思考中...")
+            if st.button("刷新"):
+                st.rerun()
+
+# ---------- Agent ----------
+elif mode == "Agent":
+    st.title("Agent助手")
+    st.caption("支持：天气、时间、计算器、驾考咨询、文本检测、经典语录等")
+    q = st.text_input("问题", placeholder="例如：给我来一条舔狗语录")
+    if st.button("运行") and q:
+        with st.spinner("思考中..."):
+            try:
+                r = requests.post(f"{BACKEND}/agent", json={"question": q}, timeout=30)
+                if r.status_code == 200:
+                    data = r.json()
+                    st.success(f"答案: {data['answer']}")
+                    if data.get("steps"):
+                        with st.expander("推理过程"):
+                            for step in data["steps"]:
+                                st.markdown(step)
+                else:
+                    st.error(f"后端错误，状态码: {r.status_code}")
+            except Exception as e:
+                st.error(f"请求异常: {e}")
+
+# ---------- 经典语录独立页面 ----------
+elif mode == "经典语录":
+    st.title("📖 经典语录大全")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        if st.button("🐶 舔狗语录"):
+            r = requests.get(f"{BACKEND}/tiangou")
+            if r.status_code == 200:
+                st.success(r.json()["content"])
+            else:
+                st.error("获取失败")
+    with col2:
+        if st.button("💖 情话语录"):
+            r = requests.get(f"{BACKEND}/qinghua")
+            if r.status_code == 200:
+                st.success(r.json()["content"])
+            else:
+                st.error("获取失败")
+    with col3:
+        if st.button("🔥 骚话语录"):
+            r = requests.get(f"{BACKEND}/saohua")
+            if r.status_code == 200:
+                st.success(r.json()["content"])
+            else:
+                st.error("获取失败")
+
+# ---------- 文本检测独立页面 ----------
+elif mode == "文本检测":
+    st.title("🔍 AI文本违规检测")
+    text = st.text_area("请输入要检测的文本", height=150)
+    if st.button("检测安全") and text:
+        r = requests.post(f"{BACKEND}/text_security", json={"text": text})
+        if r.status_code == 200:
+            data = r.json()
+            if data["success"]:
+                st.info(f"检测结果：{data['result']}")
+                if data.get("detail"):
+                    st.write(f"详情：{data['detail']}")
+            else:
+                st.error(data["message"])
+        else:
+            st.error("检测服务异常")
+'''
+    script_path = os.path.join(os.path.dirname(__file__), "streamlit_app.py")
+    with open(script_path, "w", encoding="utf-8") as f:
+        f.write(code)
+    return script_path
+
+def run_streamlit():
+    script = create_streamlit_app()
+    subprocess.Popen(["streamlit", "run", script], shell=True)
 
 # ==================== 主程序 ====================
-def download_models():
-    """下载模型"""
-    try:
-        from modelscope.hub.snapshot_download import snapshot_download
-
-        print("正在下载Qwen2.5模型...")
-        snapshot_download('Qwen/Qwen2.5-0.5B-Instruct', cache_dir='models')
-
-        print("正在下载Embedding模型...")
-        snapshot_download('AI-ModelScope/bge-large-zh-v1.5', cache_dir='models')
-
-        print("模型下载完成！")
-    except Exception as e:
-        print(f"下载失败: {e}")
-        print("请手动下载或确保网络连接正常")
-
 def start_web_service():
-    """启动Web服务"""
-    # 启动后端
-    server = FastAPIServer()
-    if not server.start():
-        print("后端启动失败")
-        return
-
-    time.sleep(2)
-
-    # 启动前端
-    print("\n启动Streamlit前端...")
-    StreamlitUI.run()
+    def run_backend():
+        uvicorn.run(app, host="0.0.0.0", port=Config.BACKEND_PORT, log_level="warning")
+    t = threading.Thread(target=run_backend, daemon=True)
+    t.start()
+    time.sleep(1)
+    print(f"✅ 后端启动: http://localhost:{Config.BACKEND_PORT}")
+    run_streamlit()
+    print("✅ 前端已启动，浏览器将打开 http://localhost:8501")
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("关闭服务")
 
 def main():
-    """主函数"""
     print("""
 ╔══════════════════════════════════════════════════════════════╗
-║    基于Qwen2.5的RAG+Agent完整项目                            ║
-║    功能: 基础推理 | RAG问答 | Agent代理 | Web服务            ║
+║  完整AI平台 - 新增驾考、文本检测、经典语录（舔狗/情话/骚话）║
+║  功能：聊天 | 成语接龙 | 天气 | Agent工具 | 独立语录页面    ║
 ╚══════════════════════════════════════════════════════════════╝
     """)
-
-    # # 检查依赖
-    # if not check_dependencies():
-    #     return
-
-    print("\n请选择功能:")
-    print("1. 下载模型")
-    print("2. 基础推理演示")
-    print("3. RAG问答演示")
-    print("4. Agent代理演示")
-    print("5. 启动Web服务（FastAPI + Streamlit）")
-    print("6. 性能测试")
-    print("7. 退出")
-
-    choice = input("\n请输入选项 (1-7): ").strip()
-
-    if choice == "1":
-        download_models()
-    elif choice == "2":
+    print("1. 基础推理  2. 成语接龙  3. Agent命令行  4. 启动Web服务  5. 退出")
+    c = input("请选择: ").strip()
+    if c == "1":
         BasicInference().run_demo()
-    elif choice == "3":
-        RAGQA().run_demo()
-    elif choice == "4":
+    elif c == "2":
+        IdiomSolitaire().run_demo()
+    elif c == "3":
         AgentDemo().run_demo()
-    elif choice == "5":
+    elif c == "4":
         start_web_service()
-    elif choice == "6":
-        test = PerformanceTest()
-        print("\n选择测试方式:")
-        print("1. Transformers本地推理")
-        print("2. Ollama API")
-        sub = input("请选择 (1/2): ").strip()
-        if sub == "1":
-            test.test_transformers()
-        else:
-            test.test_ollama()
     else:
-        print("再见！")
+        print("再见")
 
 if __name__ == "__main__":
     main()
